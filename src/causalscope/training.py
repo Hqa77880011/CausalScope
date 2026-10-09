@@ -1,3 +1,4 @@
+import itertools
 import random
 from pathlib import Path
 
@@ -87,6 +88,128 @@ def calibrate_temperature(logits, roots):
 
     optimizer.step(closure)
     return float(log_temperature.detach().exp().clamp(0.05, 20))
+
+
+def calibrate_decisions(model, dataset, checkpoint, device):
+    ranking = checkpoint["config"]["ranking"]
+    effective = dict(ranking)
+    if checkpoint["method"] != "causalscope":
+        effective["counterfactual"] = False
+    calibration = HealthyCalibration(checkpoint["calibration"])
+    arrays = []
+    batch_size = checkpoint["config"]["training"]["batch_size"]
+    with torch.inference_mode():
+        for start in range(0, len(dataset), batch_size):
+            x = torch.from_numpy(dataset.arrays["x"][start : start + batch_size]).to(
+                device
+            )
+            keys = [
+                row["domain"] for row in dataset.metadata[start : start + batch_size]
+            ]
+            result = score_components(
+                model, x, keys, calibration, effective, checkpoint["temperature"]
+            )
+            arrays.append(
+                np.stack(
+                    [
+                        result["scores"].argmax(-1).cpu().numpy(),
+                        result["probabilities"].max(-1).values.cpu().numpy(),
+                        result["gains"].max(-1).values.cpu().numpy(),
+                        result["missing_fraction"].cpu().numpy(),
+                    ],
+                    axis=1,
+                )
+            )
+    evidence = np.concatenate(arrays)
+    roots = dataset.arrays["roots"]
+    eligible = roots.sum(-1) <= 1
+    truth = np.where(roots.sum(-1) == 1, roots.argmax(-1), -1)
+    workloads = np.array([row["workload"] for row in dataset.metadata])
+    workload_names = sorted(set(workloads[eligible]))
+    if not np.any(truth[eligible] >= 0):
+        raise ValueError("Decision calibration needs single-fault validation windows")
+    defaults = (
+        ranking["probability_threshold"],
+        ranking["gain_threshold"],
+        ranking["missing_threshold"],
+    )
+    probability_grid = ranking.get("probability_grid", [defaults[0]])
+    gain_grid = (
+        ranking.get("gain_grid", [defaults[1]])
+        if effective["counterfactual"]
+        else [defaults[1]]
+    )
+    missing_grid = ranking.get("missing_grid", [defaults[2]])
+    if not probability_grid or not gain_grid or not missing_grid:
+        raise ValueError("Validation threshold grids must be nonempty")
+    best, best_distance, chosen = -1.0, float("inf"), None
+    for probability, gain, missing in itertools.product(
+        probability_grid, gain_grid, missing_grid
+    ):
+        if not 0 <= probability <= 1 or not 0 <= missing <= 1 or gain < 0:
+            raise ValueError("Invalid validation threshold grid")
+        abstain = (evidence[:, 1] < probability) | (evidence[:, 3] > missing)
+        if effective["counterfactual"]:
+            abstain |= evidence[:, 2] < gain
+        predicted = np.where(abstain, -1, evidence[:, 0].astype(int))
+        scores = []
+        for workload in workload_names:
+            selected = eligible & (workloads == workload)
+            scores.append(
+                f1_score(
+                    truth[selected],
+                    predicted[selected],
+                    labels=np.arange(len(checkpoint["schema"]["components"])),
+                    average="macro",
+                    zero_division=0,
+                )
+            )
+        score = float(np.mean(scores))
+        distance = sum(
+            abs(value - default)
+            for value, default in zip((probability, gain, missing), defaults)
+        )
+        if score > best or (score == best and distance < best_distance):
+            best, best_distance = score, distance
+            chosen = {
+                "probability_threshold": float(probability),
+                "gain_threshold": float(gain),
+                "missing_threshold": float(missing),
+            }
+    ranking.update(chosen)
+    checkpoint["decision_calibration"] = {
+        "split": "validation",
+        "workloads": workload_names,
+        "windows": int(eligible.sum()),
+        "mean_macro_f1": best,
+        "thresholds": chosen,
+        "healthy_windows": int((truth[eligible] == -1).sum()),
+    }
+    return checkpoint["decision_calibration"]
+
+
+def calibrate_checkpoint(prepared, checkpoint_path, output, device="cpu"):
+    prepared = Path(prepared)
+    model, checkpoint = model_from_checkpoint(checkpoint_path, device)
+    if checkpoint["schema"] != read_json(prepared / "metadata.json")[
+        "schema"
+    ] or checkpoint["calibration"] != read_json(prepared / "calibration.json"):
+        raise ValueError(
+            "Checkpoint schema and calibration must match prepared validation data"
+        )
+    dataset = WindowDataset(prepared / "validation.npz")
+    _, logits = validation_f1(
+        model,
+        dataset,
+        device,
+        checkpoint["config"]["training"]["batch_size"],
+        len(checkpoint["schema"]["components"]),
+    )
+    checkpoint["temperature"] = calibrate_temperature(logits, dataset.arrays["roots"])
+    summary = calibrate_decisions(model, dataset, checkpoint, device)
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    torch.save(checkpoint, output)
+    return {"temperature": checkpoint["temperature"], **summary}
 
 
 def train_neural(prepared, output, config, method, seed, device):
@@ -213,6 +336,8 @@ def train_neural(prepared, output, config, method, seed, device):
     checkpoint["temperature"] = calibrate_temperature(
         logits, validation_data.arrays["roots"]
     )
+    if config["ranking"].get("tune_thresholds", True):
+        calibrate_decisions(model, validation_data, checkpoint, device)
     torch.save(checkpoint, output / "model.pt")
     write_json(
         output / "selection.json",
@@ -221,6 +346,7 @@ def train_neural(prepared, output, config, method, seed, device):
             "best_validation_macro_f1": best,
             "temperature": checkpoint["temperature"],
             "parameter_count": checkpoint["parameter_count"],
+            "decision_calibration": checkpoint.get("decision_calibration"),
         },
     )
     return str(output / "model.pt")

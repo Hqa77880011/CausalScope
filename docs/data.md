@@ -37,7 +37,7 @@ A manifest is a nonempty JSON list. Paths are relative to the manifest directory
 
 All four partitions must be present to train and evaluate: `calibration`, `train`, `validation`, and `test`. Healthy training and validation executions are needed by anomaly baselines and the fault-probability head. A calibration execution must be verified healthy and must not be reused as a training, validation, or test execution. Use a distinct ID and recording for every execution; changing the ID does not turn a reused recording into an independent sample.
 
-`roots` is empty for healthy recordings and contains one or two component names for fault recordings. `fault_start` and `fault_end` are the actual applied interval, in seconds. The injected component is the label. No label is inferred from anomaly magnitude.
+`roots` is empty for healthy recordings and contains one or two component names for fault recordings. `fault_start` and `fault_end` are the actual applied interval, in seconds. The injected component is the label. No label is inferred from anomaly magnitude. Collector-generated manifests also preserve `faults` (component-to-intensity mapping), `intensity_level` (zero-based level 0–2), and `execution_seed`. Imported manifests can supply the same fields; unspecified intensities are omitted from intensity-specific tables.
 
 ## CSV files
 
@@ -66,13 +66,13 @@ For a per-rank graph, name metrics explicitly, such as `rank0.gpu_clock` and `ra
 | `metadata.json` | Exact schema, configuration, visible domains, held-out workload |
 | `calibration.json` | Healthy location/scale statistics, target statistics, conditional replacement coefficients |
 | `graph.json` | Directed edges with type, positive lag, raw weight, and normalized message coefficient |
-| `train.npz`, `validation.npz`, `test.npz` | Input tensors, regression targets, component labels, fault labels, and visible-domain indices |
+| `train.npz`, `validation.npz`, `test.npz` | Input tensors, regression targets, per-sample normalized step traces, component labels, fault labels, and visible-domain indices |
 | `train.json`, `validation.json`, `test.json` | Execution identity, domain, window interval, and fault interval for each tensor |
 
 Input tensors have shape `[windows, nodes, samples, 3]`. The features are robust-normalized value, missingness bit, and age divided by window duration, capped at one. Carry-forward observations become missing after two grid positions; their last value remains with a missingness bit. Values before the first observation are initialized to the healthy median. Completely unavailable healthy counters use zero location and unit scale while remaining missing.
 
 The step target is the mean aligned observed step duration over the window, normalized against its matched healthy step statistics. Before-fault windows are healthy. Windows ending during an applied fault interval are labeled with the injected roots, including transition windows. Windows ending after fault removal are excluded from the localization datasets. Separate incident recordings can still be passed to `localize` for complete replay.
 
-Overlapping windows remain within their execution's partition. A held-out fold moves every non-calibration execution of the target workload to test and reserves dual faults for test. Its healthy references are used for normalization and replacement, while lagged-edge discovery uses only visible-workload calibration windows.
+Overlapping windows remain within their execution's partition. A held-out fold moves every non-calibration execution of the target workload to test, excludes visible-workload test executions from that fold, and excludes visible-workload dual faults from training. Its test split therefore contains only the held-out workload. Its healthy references are used for normalization and replacement, while lagged-edge discovery uses only visible-workload calibration windows.
 
 Retain raw recordings alongside their applied-fault metadata to interpret observations. Recordings, prepared arrays, and calibration artifacts belong under `data/` and are ignored by Git.

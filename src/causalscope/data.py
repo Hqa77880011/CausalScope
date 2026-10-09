@@ -149,10 +149,13 @@ def prepare(manifest, schema, config, output, held_out=None):
         key = domain_key(run)
         x = calibration.transform(key, record)
         split = run["split"]
-        if held_out and run["workload"] == held_out and split != "calibration":
-            split = "test"
-        elif held_out and len(run["roots"]) > 1:
-            split = "test"
+        if held_out:
+            if run["workload"] == held_out and split != "calibration":
+                split = "test"
+            elif run["workload"] != held_out and (
+                split == "test" or len(run["roots"]) > 1
+            ):
+                continue
         for end in range(length, len(x) + 1, stride):
             start = end - length
             window = x[start:end].transpose(1, 0, 2)
@@ -178,6 +181,9 @@ def prepare(manifest, schema, config, output, held_out=None):
                 {
                     "x": window,
                     "target": target,
+                    "step_trace": calibration.normalize_target(
+                        key, record["target"][start:end]
+                    ),
                     "roots": roots,
                     "fault": float(roots.any()),
                     "domain": domains.index(key) if key in domains else -1,
@@ -185,6 +191,11 @@ def prepare(manifest, schema, config, output, held_out=None):
                         "run_id": run["id"],
                         "workload": run["workload"],
                         "domain": key,
+                        "world_size": run["world_size"],
+                        "batch_size": run["batch_size"],
+                        "faults": run.get("faults"),
+                        "intensity_level": run.get("intensity_level"),
+                        "execution_seed": run.get("execution_seed"),
                         "start": window_start,
                         "end": window_end,
                         "fault_start": run.get("fault_start"),
@@ -209,7 +220,7 @@ def prepare(manifest, schema, config, output, held_out=None):
                 [row[key] for row in rows],
                 dtype=np.float32 if key != "domain" else np.int64,
             )
-            for key in ("x", "target", "roots", "fault", "domain")
+            for key in ("x", "target", "step_trace", "roots", "fault", "domain")
         }
         np.savez_compressed(output / f"{split}.npz", **arrays)
         write_json(output / f"{split}.json", [row["meta"] for row in rows])

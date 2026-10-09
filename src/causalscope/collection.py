@@ -32,6 +32,7 @@ class Monitor:
         self.stop_event = threading.Event()
         self.error = None
         self.wall_start = time.perf_counter()
+        self.wall_end = None
         self.cpu_seconds = 0.0
         self.rss = []
         self.stream = Path(path).open("w", newline="", encoding="utf-8")
@@ -153,6 +154,7 @@ class Monitor:
 
     def __enter__(self):
         self._network()
+        self.wall_start = time.perf_counter()
         self.thread.start()
         return self
 
@@ -160,6 +162,7 @@ class Monitor:
         self.stop_event.set()
         if self.thread.ident is not None:
             self.thread.join()
+        self.wall_end = time.perf_counter()
         self.stream.close()
         if self.nvml is not None:
             self.nvml.nvmlShutdown()
@@ -167,7 +170,9 @@ class Monitor:
             raise RuntimeError("Telemetry collection failed") from self.error
 
     def overhead(self):
-        elapsed = time.perf_counter() - self.wall_start
+        elapsed = (
+            self.wall_end if self.wall_end is not None else time.perf_counter()
+        ) - self.wall_start
         return {
             "monitor_cpu_percent_one_core": 100 * self.cpu_seconds / max(elapsed, 1e-9),
             "process_rss_mb_mean": sum(self.rss) / len(self.rss) if self.rss else None,

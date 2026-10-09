@@ -33,25 +33,29 @@ def run_suite(args):
     schema = load_schema(args.schema)
     outputs = []
     variants = {method: (method, copy.deepcopy(base)) for method in args.methods}
-    if args.ablations:
-        for name in (
-            "no_prior",
-            "prior_only",
-            "data_only",
-            "no_invariance",
-            "no_counterfactual",
-            "lstm_encoder",
-            "no_iterative",
-        ):
+    changes = {
+        "no_prior": ("graph", "mode", "no_prior"),
+        "prior_only": ("graph", "mode", "prior"),
+        "data_only": ("graph", "mode", "data"),
+        "no_invariance": ("model", "invariant", False),
+        "no_counterfactual": ("ranking", "counterfactual", False),
+        "lstm_encoder": ("model", "temporal", "lstm"),
+        "no_iterative": ("ranking", "iterative", False),
+    }
+    names = (
+        args.ablation_names
+        if args.ablation_names is not None
+        else list(changes)
+        if args.ablations
+        else []
+    )
+    if names:
+        for name in names:
             variants[name] = ("causalscope", copy.deepcopy(base))
-        variants["no_prior"][1]["graph"]["mode"] = "no_prior"
-        variants["prior_only"][1]["graph"]["mode"] = "prior"
-        variants["data_only"][1]["graph"]["mode"] = "data"
-        variants["no_invariance"][1]["model"]["invariant"] = False
-        variants["no_counterfactual"][1]["ranking"]["counterfactual"] = False
-        variants["no_counterfactual"][1]["ranking"]["iterative"] = False
-        variants["lstm_encoder"][1]["model"]["temporal"] = "lstm"
-        variants["no_iterative"][1]["ranking"]["iterative"] = False
+            section, field, value = changes[name]
+            variants[name][1][section][field] = value
+            if name == "no_counterfactual":
+                variants[name][1]["ranking"]["iterative"] = False
     graph_directories = {}
     for name, (method, config) in variants.items():
         mode = config["graph"]["mode"]
@@ -78,6 +82,27 @@ def run_suite(args):
             write_json(report_path, report)
             outputs.append(directory / "evaluation")
     plot_results(outputs, Path(args.output) / "plots")
+
+
+def run_lowo(args):
+    from .experiments import WORKLOADS
+    from .reports import paper_report
+
+    workloads = sorted({run["workload"] for run in read_json(args.manifest)})
+    if set(workloads) != set(WORKLOADS):
+        raise ValueError(
+            "The four-fold paper protocol requires all four paper workloads"
+        )
+    outputs = []
+    for workload in WORKLOADS:
+        fold = copy.copy(args)
+        fold.held_out = workload
+        if fold.ablation_names is None and not fold.ablations:
+            fold.ablation_names = ["no_invariance"]
+        fold.output = str(Path(args.output) / workload)
+        run_suite(fold)
+        outputs.append(fold.output)
+    return paper_report(outputs, Path(args.output) / "report")
 
 
 def localize(args):
@@ -266,6 +291,14 @@ def parser():
     train.add_argument("--device", default="cpu")
     train.add_argument("--epochs", type=int)
     train.add_argument("--batch-size", type=int)
+    calibrate = commands.add_parser(
+        "calibrate",
+        help="Fit temperature and abstention thresholds using validation windows",
+    )
+    calibrate.add_argument("--prepared", required=True)
+    calibrate.add_argument("--checkpoint", required=True)
+    calibrate.add_argument("--output", required=True)
+    calibrate.add_argument("--device", default="cpu")
     evaluate_command = commands.add_parser(
         "evaluate", help="Compute localization metrics from measured windows"
     )
@@ -311,7 +344,48 @@ def parser():
     suite.add_argument("--seeds", nargs="+", type=int)
     suite.add_argument("--epochs", type=int)
     suite.add_argument("--ablations", action="store_true")
+    ablation_choices = [
+        "no_prior",
+        "prior_only",
+        "data_only",
+        "no_invariance",
+        "no_counterfactual",
+        "lstm_encoder",
+        "no_iterative",
+    ]
+    suite.add_argument("--ablation-names", nargs="+", choices=ablation_choices)
     suite.add_argument("--device", default="cpu")
+    lowo = commands.add_parser(
+        "lowo", help="Run all four leave-one-workload-out folds and aggregate seeds"
+    )
+    configured(lowo)
+    lowo.add_argument("--manifest", required=True)
+    lowo.add_argument("--output", required=True)
+    lowo.add_argument(
+        "--methods",
+        nargs="+",
+        choices=[
+            "threshold",
+            "pca",
+            "isolation_forest",
+            "autoencoder",
+            "lstm",
+            "tcn",
+            "gnn",
+            "causalscope",
+        ],
+        default=["tcn", "gnn", "causalscope"],
+    )
+    lowo.add_argument("--ablation-names", nargs="+", choices=ablation_choices)
+    lowo.add_argument("--ablations", action="store_true")
+    lowo.add_argument("--seeds", nargs="+", type=int)
+    lowo.add_argument("--epochs", type=int)
+    lowo.add_argument("--device", default="cpu")
+    report = commands.add_parser(
+        "paper-report", help="Aggregate measured reports into paper tables and figures"
+    )
+    report.add_argument("--inputs", nargs="+", required=True)
+    report.add_argument("--output", required=True)
     plot = commands.add_parser("plot", help="Plot real metric reports")
     plot.add_argument("--inputs", nargs="+", required=True)
     plot.add_argument("--output", required=True)
@@ -322,6 +396,11 @@ def parser():
     timeline.add_argument("--predictions", required=True)
     timeline.add_argument("--run-id", required=True)
     timeline.add_argument("--output", required=True)
+    timeline.add_argument(
+        "--window-end",
+        type=float,
+        help="Plot the prepared window nearest this end timestamp",
+    )
     replay = commands.add_parser(
         "replay", help="Emit recommendations after stable consecutive rankings"
     )
@@ -345,7 +424,7 @@ def parser():
     )
     overhead.add_argument("--prepared", required=True)
     overhead.add_argument("--checkpoint", required=True)
-    overhead.add_argument("--sizes", nargs="+", type=int, default=[19, 24, 32, 48])
+    overhead.add_argument("--sizes", nargs="+", type=int, default=[24, 36, 48, 60])
     overhead.add_argument("--repeats", type=int, default=100)
     overhead.add_argument("--warmup", type=int, default=10)
     overhead.add_argument(
@@ -359,6 +438,13 @@ def parser():
     )
     overhead_plot.add_argument("--report", required=True)
     overhead_plot.add_argument("--output", required=True)
+    collection = commands.add_parser(
+        "collection-cost",
+        help="Summarize matched healthy monitoring/reference recordings",
+    )
+    collection.add_argument("--reference", required=True)
+    collection.add_argument("--monitored", required=True)
+    collection.add_argument("--output", required=True)
     return root
 
 
@@ -414,6 +500,18 @@ def main():
         )
     elif args.command == "suite":
         run_suite(args)
+    elif args.command == "calibrate":
+        from .training import calibrate_checkpoint
+
+        result = calibrate_checkpoint(
+            args.prepared, args.checkpoint, args.output, args.device
+        )
+    elif args.command == "lowo":
+        result = run_lowo(args)
+    elif args.command == "paper-report":
+        from .reports import paper_report
+
+        result = paper_report(args.inputs, args.output)
     elif args.command == "plot":
         from .visualization import plot_results
 
@@ -421,7 +519,9 @@ def main():
     elif args.command == "timeline":
         from .visualization import plot_timeline
 
-        plot_timeline(args.prepared, args.predictions, args.run_id, args.output)
+        plot_timeline(
+            args.prepared, args.predictions, args.run_id, args.output, args.window_end
+        )
     elif args.command == "replay":
         from .online import replay_decisions
 
@@ -448,6 +548,10 @@ def main():
         from .visualization import plot_overhead
 
         plot_overhead(args.report, args.output)
+    elif args.command == "collection-cost":
+        from .overhead import collection_cost
+
+        result = collection_cost(args.reference, args.monitored, args.output)
     if result is not None:
         print(json.dumps(result, indent=2, allow_nan=False))
 

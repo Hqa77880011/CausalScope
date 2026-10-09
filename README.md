@@ -118,7 +118,14 @@ causalscope train --prepared data/prepared --output runs/causalscope --device cu
 causalscope evaluate --prepared data/prepared --checkpoint runs/causalscope/model.pt --output results/causalscope --device cuda:0
 ```
 
-The defaults are 64 hidden channels, dropout 0.2, AdamW at `1e-3`, weight decay `1e-4`, batch size 64, and at most 100 epochs. Early stopping uses mean validation macro-F1 across visible workloads with ten epochs of patience. The root probabilities receive validation-only temperature calibration. `--epochs`, `--batch-size`, and `--seed` override the corresponding training choices. Use `--device cpu` when CUDA is unavailable.
+The defaults are 64 hidden channels, dropout 0.2, AdamW at `1e-3`, weight decay `1e-4`, batch size 64, and at most 100 epochs. Early stopping uses mean validation macro-F1 across visible workloads with ten epochs of patience. Root probabilities receive validation-only temperature calibration, followed by validation-only selection of probability, replacement-gain, and missingness thresholds. Healthy validation windows contribute false-positive predictions to the selection objective. The selected thresholds are saved in the checkpoint and `selection.json`, then frozen for test. Set `ranking.tune_thresholds: false` to retain fixed thresholds. `--epochs`, `--batch-size`, and `--seed` override the corresponding training choices. Use `--device cpu` when CUDA is unavailable.
+
+An existing checkpoint can be calibrated against its matching prepared validation split:
+
+```bash
+causalscope calibrate --prepared data/prepared --checkpoint runs/causalscope/model.pt \
+  --output runs/causalscope/model-calibrated.pt --device cuda:0
+```
 
 For an unlabeled incident recording in the same schema and a calibrated domain:
 
@@ -133,22 +140,27 @@ causalscope localize --telemetry data/incident-telemetry.csv --steps data/incide
 ## 6. Compare methods and run ablations
 
 ```bash
-causalscope suite --manifest data/telemetry/manifest.json --output runs/comparison --device cuda:0
-causalscope suite --manifest data/telemetry/manifest.json --output runs/ablations --methods causalscope --ablations --device cuda:0
+causalscope suite --manifest data/telemetry/manifest.json --output runs/comparison --ablations --device cuda:0
 ```
 
 The suite trains the requested methods using seeds 0–4, evaluates each checkpoint, and creates comparison plots. Override seeds with `--seeds 0 1`. Methods are Static Threshold (`threshold`), PCA (`pca`), Isolation Forest (`isolation_forest`), Autoencoder (`autoencoder`), LSTM (`lstm`), TCN (`tcn`), Telemetry GNN (`gnn`), and CausalScope (`causalscope`). Individual baselines also use `train --method NAME`; anomaly baselines save `baseline.joblib` instead of `model.pt`.
 
-Ablations remove prior edges, use prior-only or data-only graphs, disable invariant learning, disable counterfactual ranking, replace the TCN with LSTM, or disable the second intervention pass. The settings and their precise meanings are documented in [implementation conventions](docs/method.md).
+Ablations remove prior edges, use prior-only or data-only graphs, disable invariant learning, disable counterfactual ranking, replace the TCN with LSTM, or disable the second intervention pass. Select a subset with `--ablation-names no_invariance no_iterative`. The settings and their precise meanings are documented in [implementation conventions](docs/method.md).
 
 To evaluate a held-out workload:
 
 ```bash
 causalscope suite --manifest data/telemetry/manifest.json --held-out vit_b_16 \
-  --output runs/heldout-vit --methods causalscope --ablations --device cuda:0
+  --output runs/heldout-vit --methods tcn gnn causalscope --ablation-names no_invariance --device cuda:0
 ```
 
-Run a fold for each of the four workload names. Target faulty executions never train the model or graph. The target's independent healthy recordings provide normalization and replacement calibration. Held-out accuracy therefore measures localization with healthy target calibration.
+To run all four folds and aggregate their seed results:
+
+```bash
+causalscope lowo --manifest data/telemetry/manifest.json --output runs/lowo --device cuda:0
+```
+
+The default comparison matches the cross-workload figure: TCN, Telemetry GNN, CausalScope without invariance, and full CausalScope, each with five seeds. Each fold's test split contains only its held-out workload. Target faulty executions never train the model or graph. The target's independent healthy recordings provide normalization and replacement calibration. Held-out accuracy therefore measures localization with healthy target calibration.
 
 ## 7. Inspect metrics and plots
 
@@ -159,7 +171,7 @@ Run a fold for each of the four workload names. Target faulty executions never t
 | `metrics.json` | Top-1, Top-3, macro-F1, macro component AUROC; NDCG@2, exact Top-2, Cover@1; detection delay and inference latency |
 | `predictions.json` | Per-window labels, ordered components, scores, abstention, probabilities, gains, and metric evidence |
 | `incidents.json` | Per-execution stable-detection delay and undetected incidents |
-| `breakdown.csv` | Per-workload and per-fault results |
+| `breakdown.csv` | Per-workload, per-fault, rank-count, intensity-level, and fault-pair results |
 
 Scores are fractions in `[0, 1]`; multiply by 100 for percentages. Single-fault windows supply classification metrics. Dual-fault windows supply ranking metrics. An abstention scores zero for the corresponding ranking endpoints. Detection delay ends when the same correct leading component appears in three accepted consecutive windows. Its mean includes detected executions; the detection rate and undetected count report the remaining incidents. AUROC averages one-vs-rest component scores over classes with both positive and negative labels. Overlapping windows are not independent experimental replicates.
 
@@ -171,23 +183,49 @@ causalscope timeline --prepared data/prepared --predictions results/causalscope/
 
 Plots include method comparisons, workload transfer, per-fault accuracy, and observed fault timelines. Multiple input directories are combined into `comparison.csv`; figures average the supplied seed reports.
 
+The timeline uses the aligned 5 Hz samples and includes measured normalized step time. Use `--window-end SECONDS` to inspect one 24-second window. Prepared data from an earlier version should be regenerated to include the per-sample step trace.
+
+Generate all paper tables and the combined cross-workload figure from evaluated runs:
+
+```bash
+causalscope paper-report --inputs runs/comparison runs/lowo --output results/paper
+```
+
+This creates `main_results.csv`, `ablation.csv`, `multifault.csv`, `fault_breakdown.csv`, `cross_workload.csv`, and `cross_workload_mean.csv`, together with corresponding figures. It also writes `rank_scale.csv`, `intensity.csv`, `fault_pairs.csv`, `seed_results.csv`, and `model_selection.csv`. Cross-workload averages first average seeds within a fold, then give each available fold equal weight. Reports reject duplicate method/seed/fold identities and folds containing mixed test workloads. [Experiment protocols](docs/experiments.md) map each paper experiment to its command and output.
+
 ## 8. Measure online cost
 
 ```bash
 causalscope overhead --prepared data/prepared --checkpoint runs/causalscope/model.pt \
-  --sizes 19 24 32 48 --device cpu --output results/overhead.json
+  --sizes 24 36 48 60 --device cpu --output results/overhead.json
 causalscope plot-overhead --report results/overhead.json --output results/plots/overhead.png
 ```
 
 The benchmark measures full ranking latency, including screened interventions and iterative ranking, after warmup. It reports median, mean, and 95th-percentile latency, process RSS, and CUDA peak allocation when applicable. Additional graph nodes duplicate measured channels to measure computational scaling; they do not represent additional physical GPUs or new localization experiments.
 
-Collection reports include monitor thread CPU as a percentage of one core and mean/peak workload-process RSS. For throughput loss, collect matched healthy jobs with identical parameters, once with monitoring and once with `--no-monitor`, using separate recording directories. Keep the phase instrumentation constant. Supply their measured values in a CSV:
+Collect paired healthy jobs and calculate monitoring cost directly from their metadata:
+
+```bash
+python scripts/measure_collection.py --workload resnet50 --dataset data/imagenet100 \
+  --ranks 2 --batch-size 32 --steps 200 --repeats 5 --output data/collection-cost
+```
+
+The runner alternates measurement order across seeds and keeps phase instrumentation, step count, model, batch size, and seed fixed within each pair. It writes `collection_cost.json` and `collection_cost.csv` with measured throughput loss, monitor thread CPU, CPU relative to host capacity, process RSS, and the paired RSS difference. RSS sums worker-process snapshots and can count shared pages more than once; a signed RSS difference is retained as measured.
+
+For recordings collected separately, including on two hosts, gather all rank metadata and summarize matching execution IDs:
+
+```bash
+causalscope collection-cost --reference data/collection-cost/reference \
+  --monitored data/collection-cost/monitored --output results/collection-cost.json
+```
+
+The summarizer checks that all ranks completed and that workload, rank count, batch size, seed, dataset path, executed step count, host placement, worker count, framework, and phase mode match. Use `collect --segment-seconds 0` for manually collected pairs so both jobs execute the same step count. Existing external throughput measurements can also be supplied as a CSV to `overhead --pairs PATH`:
 
 ```text
 pair_id,without_monitor_steps_per_second,with_monitor_steps_per_second,monitor_cpu_percent_one_core,process_rss_mb_mean
 ```
 
-Append measurement rows, then pass the file as `overhead --pairs PATH`. Throughput loss is `100 * (1 - monitored / reference)`. No throughput or overhead results are populated in advance.
+Throughput loss is `100 * (1 - monitored / reference)`. No throughput or overhead results are populated in advance.
 
 ## Implementation details
 

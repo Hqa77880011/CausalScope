@@ -10,6 +10,7 @@ from importlib.metadata import version
 from pathlib import Path
 
 import numpy as np
+import psutil
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
@@ -327,6 +328,9 @@ def run_workload(args):
         "phase_mode": "serialized_gradient_communication",
         "injection_events": [],
         "completed": False,
+        "num_workers": args.workers,
+        "dataset": str(Path(args.dataset).resolve()),
+        "logical_cpus": psutil.cpu_count(),
     }
     git = subprocess.run(["git", "rev-parse", "HEAD"], text=True, capture_output=True)
     metadata["git_revision"] = git.stdout.strip() if git.returncode == 0 else None
@@ -473,6 +477,7 @@ def run_workload(args):
         metadata["actual_steps"] = len(step_rows)
         metadata["segment_seconds"] = args.segment_seconds
         metadata["last_training_loss"] = float(loss.detach())
+        metadata["process_rss_mb_end"] = psutil.Process().memory_info().rss / 1e6
         metadata["completed"] = True
     finally:
         faults.stop()

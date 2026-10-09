@@ -5,6 +5,7 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 from .data import WindowDataset
@@ -91,7 +92,7 @@ def plot_results(inputs, output):
     delay.to_csv(output / "detection.csv", index=False)
 
 
-def plot_timeline(prepared, predictions, run_id, output):
+def plot_timeline(prepared, predictions, run_id, output, window_end=None):
     dataset = WindowDataset(Path(prepared) / "test.npz")
     schema = read_json(Path(prepared) / "metadata.json")["schema"]
     rows = read_json(predictions)
@@ -100,20 +101,50 @@ def plot_timeline(prepared, predictions, run_id, output):
     ]
     if not selected:
         raise ValueError(f"Execution {run_id} absent from test data")
+    if window_end is not None:
+        selected = [min(selected, key=lambda pair: abs(pair[1]["end"] - window_end))]
     names = [metric["name"] for metric in schema["metrics"]]
     figure, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
-    times = [row["end"] for _, row in selected]
+    samples = {}
+    dt = read_json(Path(prepared) / "metadata.json")["config"]["data"]["sample_seconds"]
+    for index, row in selected:
+        window = dataset.arrays["x"][index]
+        for position in range(window.shape[1]):
+            timestamp = round(row["start"] + position * dt, 8)
+            samples[timestamp] = (
+                window[:, position, 0],
+                window[:, position, 1],
+                dataset.arrays["step_trace"][index, position]
+                if "step_trace" in dataset.arrays
+                else np.nan,
+            )
+    times = sorted(samples)
     for name in ("net_tx", "allreduce_ms", "barrier_ms"):
         if name in names:
+            node = names.index(name)
             values = [
-                dataset.arrays["x"][i, names.index(name), -1, 0] for i, _ in selected
+                samples[time][0][node] if samples[time][1][node] == 0 else np.nan
+                for time in times
             ]
             axes[0].plot(times, values, label=name)
+    if "step_trace" in dataset.arrays:
+        axes[0].plot(times, [samples[time][2] for time in times], label="step_ms")
+    else:
+        axes[0].plot(
+            [row["end"] for _, row in selected],
+            [dataset.arrays["target"][index] for index, _ in selected],
+            label="step_ms_window_mean",
+        )
     axes[0].set_ylabel("Healthy-normalized value")
     axes[0].legend()
     prediction_rows = sorted(
         [row for row in rows if row["run_id"] == run_id], key=lambda row: row["end"]
     )
+    prediction_rows = [
+        row
+        for row in prediction_rows
+        if times[0] - 1e-6 <= row["end"] <= times[-1] + 1e-6
+    ]
     for i, component in enumerate(schema["components"]):
         axes[1].plot(
             [row["end"] for row in prediction_rows],
@@ -132,6 +163,77 @@ def plot_timeline(prepared, predictions, run_id, output):
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path, dpi=180)
     plt.close(figure)
+
+
+def plot_paper_tables(directory):
+    directory = Path(directory)
+    main = pd.read_csv(directory / "main_results.csv")
+    if not main.empty and {"top1", "top3"}.issubset(main.columns):
+        main.set_index("method")[["top1", "top3"]].plot.bar(
+            figsize=(10, 5), color=["#4678a5", "#76a4b8"]
+        )
+        plt.ylabel("Localization accuracy")
+        plt.ylim(0, 1)
+        plt.xticks(rotation=25, ha="right")
+        plt.tight_layout()
+        plt.savefig(directory / "main_accuracy.png", dpi=180)
+        plt.close()
+    folds = pd.read_csv(directory / "cross_workload.csv")
+    if not folds.empty and "top1" in folds:
+        workload_order = [
+            name
+            for name in ("resnet50", "mobilenet_v3_large", "vit_b_16", "bert_base")
+            if name in set(folds.held_out)
+        ]
+        workload_order += sorted(set(folds.held_out) - set(workload_order))
+        figure, axis = plt.subplots(figsize=(9, 5))
+        for method, color in (
+            ("tcn", "#a6bbc7"),
+            ("gnn", "#5d918b"),
+            ("no_invariance", "#76a4b8"),
+            ("causalscope", "#4678a5"),
+        ):
+            rows = folds[folds.method == method].set_index("held_out")
+            if not rows.empty:
+                axis.plot(
+                    workload_order,
+                    rows.top1.reindex(workload_order),
+                    marker="o",
+                    label=method,
+                    color=color,
+                )
+        axis.set_ylabel("Held-out Top-1 accuracy")
+        axis.set_ylim(0, 1)
+        axis.legend()
+        figure.tight_layout()
+        figure.savefig(directory / "cross_workload.png", dpi=180)
+        plt.close(figure)
+    for filename, metrics in (
+        ("ablation", ["top1", "macro_f1"]),
+        ("multifault", ["ndcg_at_2", "exact_top2", "cover_at_1"]),
+    ):
+        table = pd.read_csv(directory / f"{filename}.csv")
+        available = [field for field in metrics if field in table]
+        if table.empty or not available or not table[available].notna().any().any():
+            continue
+        table.set_index("method")[available].plot.bar(figsize=(10, 5), colormap="GnBu")
+        plt.ylabel("Score")
+        plt.ylim(0, 1)
+        plt.xticks(rotation=25, ha="right")
+        plt.tight_layout()
+        plt.savefig(directory / f"{filename}.png", dpi=180)
+        plt.close()
+    fault = pd.read_csv(directory / "fault_breakdown.csv")
+    if not fault.empty and "top1" in fault and fault.top1.notna().any():
+        fault.pivot(index="label", columns="method", values="top1").plot.bar(
+            figsize=(10, 5), colormap="GnBu"
+        )
+        plt.ylabel("Per-fault Top-1 accuracy")
+        plt.ylim(0, 1)
+        plt.xticks(rotation=25, ha="right")
+        plt.tight_layout()
+        plt.savefig(directory / "fault_breakdown.png", dpi=180)
+        plt.close()
 
 
 def plot_overhead(report, output):

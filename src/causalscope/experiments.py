@@ -65,6 +65,7 @@ def make_plan(output):
                             "id": f"{workload}-r{ranks}-{component}-l{level}-{repetition}",
                             "split": split,
                             "faults": {component: intensity},
+                            "intensity_level": level,
                             "seed": repetition,
                         }
                     )
@@ -80,6 +81,7 @@ def make_plan(output):
                                 a: INTENSITIES[a][level],
                                 b: INTENSITIES[b][level],
                             },
+                            "intensity_level": level,
                             "seed": repetition,
                         }
                     )
@@ -148,6 +150,9 @@ def merge_recordings(directory, output):
                 "world_size": metadata["world_size"],
                 "split": metadata["split"],
                 "roots": roots,
+                "faults": metadata["faults"],
+                "intensity_level": metadata.get("intensity_level"),
+                "execution_seed": metadata["seed"],
                 "fault_start": metadata["fault_start"],
                 "fault_end": metadata["fault_end"],
                 "telemetry": telemetry.name,

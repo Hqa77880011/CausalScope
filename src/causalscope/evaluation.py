@@ -133,7 +133,8 @@ def evaluate(prepared, checkpoint_path, output, device="cpu", split="test"):
     prepared, output = Path(prepared), Path(output)
     output.mkdir(parents=True, exist_ok=True)
     dataset = WindowDataset(prepared / f"{split}.npz")
-    schema = read_json(prepared / "metadata.json")["schema"]
+    prepared_metadata = read_json(prepared / "metadata.json")
+    schema = prepared_metadata["schema"]
     components = schema["components"]
     neural = Path(checkpoint_path).suffix == ".pt"
     if neural:
@@ -229,27 +230,44 @@ def evaluate(prepared, checkpoint_path, output, device="cpu", split="test"):
         {
             "method": checkpoint["method"],
             "seed": checkpoint["seed"],
+            "held_out": prepared_metadata["held_out"],
+            "split": split,
+            "test_workloads": sorted({row["workload"] for row in rows}),
+            "decision_thresholds": {
+                key: ranking_config[key]
+                for key in (
+                    "probability_threshold",
+                    "gain_threshold",
+                    "missing_threshold",
+                )
+            },
             "metrics": metrics,
         },
     )
     write_json(output / "incidents.json", incidents)
     groups = []
-    for field in ("workload", "root"):
-        labels = (
-            sorted({row["workload"] for row in rows})
-            if field == "workload"
-            else components
+
+    def group_label(row, field):
+        if field == "workload":
+            return row["workload"]
+        if field == "root":
+            return row["roots"][0] if len(row["roots"]) == 1 else None
+        if field == "rank_scale":
+            return str(row["world_size"]) if row.get("world_size") is not None else None
+        if field == "intensity":
+            return (
+                str(row["intensity_level"])
+                if row["roots"] and row.get("intensity_level") is not None
+                else None
+            )
+        return "+".join(sorted(row["roots"])) if len(row["roots"]) == 2 else None
+
+    for field in ("workload", "root", "rank_scale", "intensity", "fault_pair"):
+        labels = sorted(
+            {label for row in rows if (label := group_label(row, field)) is not None}
         )
         for label in labels:
-            selected = [
-                row
-                for row in rows
-                if (
-                    row["workload"] == label
-                    if field == "workload"
-                    else row["roots"] == [label]
-                )
-            ]
+            selected = [row for row in rows if group_label(row, field) == label]
             if selected:
                 groups.append(
                     {

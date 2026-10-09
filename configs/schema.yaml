@@ -1,0 +1,42 @@
+version: 1
+components: [cpu, dataloader, gpu_compute, network, storage, rank_compute, gpu_memory]
+target: step_ms
+metrics:
+  - {name: cpu_util, owner: cpu, kind: component, unit: percent, source: psutil}
+  - {name: context_switches, owner: cpu, kind: component, unit: per_second, source: psutil}
+  - {name: loader_queue, owner: dataloader, kind: component, unit: batches, source: training}
+  - {name: gpu_util, owner: gpu_compute, kind: component, unit: percent, source: nvml}
+  - {name: gpu_clock, owner: gpu_compute, kind: component, unit: MHz, source: nvml}
+  - {name: gpu_memory, owner: gpu_memory, kind: component, unit: percent, source: nvml}
+  - {name: net_tx, owner: network, kind: component, unit: MB_per_second, source: psutil}
+  - {name: net_rx, owner: network, kind: component, unit: MB_per_second, source: psutil}
+  - {name: retransmissions, owner: network, kind: component, unit: per_second, source: proc_net_snmp}
+  - {name: disk_read, owner: storage, kind: component, unit: MB_per_second, source: psutil}
+  - {name: io_wait, owner: storage, kind: component, unit: percent, source: psutil}
+  - {name: rank_progress, owner: rank_compute, kind: rank, unit: steps_per_second, source: training}
+  - {name: readiness_skew, owner: rank_compute, kind: rank, unit: ms, source: training}
+  - {name: data_ms, owner: null, kind: phase, unit: ms, source: training}
+  - {name: forward_ms, owner: null, kind: phase, unit: ms, source: training}
+  - {name: backward_ms, owner: null, kind: phase, unit: ms, source: training}
+  - {name: optimizer_ms, owner: null, kind: phase, unit: ms, source: training}
+  - {name: allreduce_ms, owner: null, kind: phase, unit: ms, source: training}
+  - {name: barrier_ms, owner: null, kind: phase, unit: ms, source: training}
+prior_edges:
+  - [cpu_util, loader_queue]
+  - [context_switches, data_ms]
+  - [disk_read, loader_queue]
+  - [io_wait, loader_queue]
+  - [loader_queue, data_ms]
+  - [data_ms, gpu_util]
+  - [gpu_clock, forward_ms]
+  - [gpu_clock, backward_ms]
+  - [gpu_memory, forward_ms]
+  - [gpu_memory, backward_ms]
+  - [net_tx, allreduce_ms]
+  - [net_rx, allreduce_ms]
+  - [retransmissions, allreduce_ms]
+  - [rank_progress, barrier_ms]
+  - [readiness_skew, barrier_ms]
+  - [forward_ms, allreduce_ms]
+  - [backward_ms, allreduce_ms]
+  - [allreduce_ms, barrier_ms]

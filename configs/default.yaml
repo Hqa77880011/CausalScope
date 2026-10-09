@@ -1,0 +1,39 @@
+data:
+  sample_seconds: 0.2
+  window_seconds: 24.0
+  stride_seconds: 2.0
+  max_forward_fill: 2
+  epsilon: 0.000001
+graph:
+  max_lag: 10
+  min_correlation: 0.5
+  stability: 0.7
+  incoming_cap: 5
+  prior_weight: 0.7
+  mode: hybrid
+model:
+  hidden: 64
+  dropout: 0.2
+  temporal: tcn
+  graph: true
+  invariant: true
+training:
+  epochs: 100
+  patience: 10
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  step_weight: 0.5
+  domain_weight: 0.2
+  score_mass_weight: 0.0001
+  fault_weight: 1.0
+  seeds: [0, 1, 2, 3, 4]
+ranking:
+  alpha: 0.55
+  candidates: 5
+  counterfactual: true
+  iterative: true
+  probability_threshold: 0.45
+  gain_threshold: 0.05
+  missing_threshold: 0.2
+  stable_windows: 3

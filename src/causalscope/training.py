@@ -179,7 +179,7 @@ def calibrate_decisions(model, dataset, checkpoint, device):
     ranking.update(chosen)
     checkpoint["decision_calibration"] = {
         "split": "validation",
-        "workloads": workload_names,
+        "workloads": [str(name) for name in workload_names],
         "windows": int(eligible.sum()),
         "mean_macro_f1": best,
         "thresholds": chosen,

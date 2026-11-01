@@ -61,11 +61,4 @@ Collection produces rank telemetry/step CSVs and metadata. Merging writes a mani
 
 ## Verification
 
-CPU functional check (2026-11-01): Python 3.13.5, torch 2.7.1+cu118, NumPy 2.1.3; one PyTorch thread, seed 7. Run `python scripts/verify_cpu.py` from the repository root. It generates independent telemetry/step CSV recordings, prepares 48 training / 48 validation / 54 test windows, runs two small-width epochs, checks finite loss, nonzero temporal/graph/root/domain/step gradients and parameter updates, checkpoint evaluation equivalence at `rtol=atol=1e-6`, evaluates counterfactual ranking, and writes plots. Hand examples check Top-1/3, macro-F1, component AUROC, NDCG@2, exact Top-2, cover@1 and stable detection delay. Outputs are under `runs/functional-check/`; generated inputs are correctness fixtures, not the paper experiments. Full workloads, hardware overhead and paper performance were not rerun. The check caught and fixed NumPy string scalars in decision-calibration metadata that prevented safe checkpoint reloading.
-
-| Paper computation / metric | Entry | Command |
-|---|---|---|
-| Healthy calibration, typed lag graph, execution splits | `data.prepare`, `calibration`, `graph` | `causalscope prepare ...` |
-| TCN, graph, domain reversal, regression and ranking loss | `model`, `training.train_neural` | `causalscope train ...` |
-| Counterfactual / dual-fault ranking and all localization metrics | `scoring`, `evaluation` | `causalscope evaluate ...` |
-| Comparisons, component ablations and plots | `experiments`, `reports`, `visualization` | `causalscope suite ... --ablations`; `causalscope plot ...` |
+Run `python scripts/verify_cpu.py` for the CPU check. It generates telemetry fixtures and checks preparation, training, localization, metrics and checkpoint restoration.
